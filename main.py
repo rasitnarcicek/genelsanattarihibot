@@ -144,10 +144,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=reply_markup
     )
 
-async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def ask_question(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Kullanıcının seçtiği sınav türüne göre rastgele bir soru gönderir."""
-    user_id = update.effective_user.id
-    logger.debug(f"ask_question fonksiyonu kullanıcı {user_id} için çağrıldı.")
+    logger.info(f"ask_question fonksiyonu kullanıcı {user_id} için çağrıldı. (Başlangıç)")
 
     if user_id not in context.user_data:
         context.user_data[user_id] = {}
@@ -155,7 +154,8 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Kullanıcının hangi sınavı seçtiğini kontrol et
     sinav_turu = context.user_data[user_id].get('sinav_turu')
     if not sinav_turu:
-        await context.bot.send_message(chat_id=user_id, text="Lütfen önce bir sınav türü seçmek için /start komutunu kullanın.")
+        logger.warning(f"Kullanıcı {user_id} için sınav türü bulunamadı, /start komutuna yönlendiriliyor.")
+        await context.bot.send_message(chat_id=chat_id, text="Lütfen önce bir sınav türü seçmek için /start komutunu kullanın.")
         return
 
     conn = get_db_connection()
@@ -166,11 +166,17 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     conn.close()
 
     if not question_data:
-        logger.warning(f"Kullanıcı {user_id} için '{sinav_turu}' türünde soru bulunamadı.")
-        await context.bot.send_message(chat_id=user_id, text=f"Üzgünüm, '{sinav_turu}' sınavı için şu anda mevcut bir soru yok.")
+        logger.warning(f"Kullanıcı {user_id} için '{sinav_turu}' türünde soru bulunamadı. Quiz durduruluyor.")
+        await context.bot.send_message(chat_id=chat_id, text=f"Üzgünüm, '{sinav_turu}' sınavı için şu anda mevcut bir soru yok. Quiz tamamlandı.")
+        # Eğer soru kalmadıysa, quiz'i tamamla ve özeti göster
+        context.user_data[user_id]['current_quiz_questions_answered'] = QUIZ_LENGTH # Quiz'i bitirmek için sayıyı QUIZ_LENGTH'e eşitle
+        # update objesi olmadığı için show_quiz_summary'ye dummy bir update objesi geçirmemiz gerekebilir
+        # veya show_quiz_summary'yi de user_id ve chat_id ile çalışacak şekilde düzenlemeliyiz.
+        # Şimdilik, sadece mesaj gönderip akışı durduruyorum.
         return
 
     question_id, question_text, image_path, options_json = question_data
+    logger.info(f"Kullanıcı {user_id} için Soru ID {question_id} başarıyla çekildi.")
     options = json.loads(options_json) if options_json else []
 
     await update_user_state_and_question(context, user_id, 'waiting_for_answer', question_id)
@@ -190,21 +196,22 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     sent_message = None
     try:
         if image_path and os.path.exists(image_path):
-            with open(image_path, 'rb') as photo_file:
-                sent_message = await context.bot.send_photo(
-                    chat_id=user_id, photo=photo_file, caption=question_display_text,
-                    reply_markup=reply_markup, parse_mode='Markdown'
-                )
+            logger.info(f"Kullanıcı {user_id} için resimli soru gönderiliyor. Soru ID: {question_id}")
+            sent_message = await context.bot.send_photo(
+                chat_id=chat_id, photo=open(image_path, 'rb'), caption=question_display_text,
+                reply_markup=reply_markup, parse_mode='Markdown'
+            )
         else:
             if image_path:
                 logger.warning(f"Resim belirtilen yolda bulunamadı: {image_path}. Soru sadece metin olarak gönderiliyor.")
+            logger.info(f"Kullanıcı {user_id} için metin tabanlı soru gönderiliyor. Soru ID: {question_id}")
             sent_message = await context.bot.send_message(
-                chat_id=user_id, text=question_display_text,
+                chat_id=chat_id, text=question_display_text,
                 reply_markup=reply_markup, parse_mode='Markdown'
             )
     except Exception as e:
         logger.error(f"Kullanıcıya ({user_id}) soru gönderilemedi: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=user_id, text="Üzgünüm, soru gönderilirken bir hata oluştu. Lütfen tekrar dene.")
+        await context.bot.send_message(chat_id=chat_id, text="Üzgünüm, soru gönderilirken bir hata oluştu. Lütfen tekrar dene.")
         return
 
     if sent_message:
@@ -230,6 +237,7 @@ async def select_quiz_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Kullanıcının sınav türü seçimini işler ve quizi başlatır."""
     query = update.callback_query
     user_id = query.from_user.id
+    chat_id = query.message.chat.id # chat_id'yi buradan al
     sinav_turu = query.data.split('_')[2] # "start_quiz_Vize" -> "Vize"
 
     await query.edit_message_text(f"Harika! **{sinav_turu} Sınavı** başlatılıyor...")
@@ -244,13 +252,14 @@ async def select_quiz_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     }
     
     # İlk soruyu sor
-    await ask_question(update, context)
+    await ask_question(user_id, chat_id, context) # ask_question'ı yeni parametrelerle çağır
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Tüm inline buton tıklamaları için ana yönlendiricidir."""
     query = update.callback_query
     data = query.data
     user_id = query.from_user.id
+    chat_id = query.message.chat.id # chat_id'yi buradan al
     
     try:
         await query.answer()
@@ -292,10 +301,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     user_db_info = cursor.fetchone()
     conn.close()
 
+    # Kullanıcının durumu 'waiting_for_answer' değilse veya soru ID'si yoksa
     if not user_db_info or user_db_info[1] != 'waiting_for_answer' or user_db_info[0] is None:
-        logger.warning(f"Kullanıcı {user_id} bir quiz butonuna tıkladı ama 'waiting_for_answer' durumunda değil.")
+        logger.warning(f"Kullanıcı {user_id} bir quiz butonuna tıkladı ama 'waiting_for_answer' durumunda değil. Data: {data}")
+        
+        # Kullanıcının tıkladığı mesajı silmeye çalış (eğer hala varsa)
         if query.message:
-            await query.edit_message_text("Bu soru zaten yanıtlandı. Yeni bir quiz için /start yaz.")
+            try:
+                await context.bot.delete_message(chat_id=user_id, message_id=query.message.message_id)
+                logger.info(f"Eski mesaj {query.message.message_id} kullanıcı {user_id} için silindi.")
+            except Exception as e:
+                logger.warning(f"Eski mesaj {query.message.message_id} kullanıcı {user_id} için silinemedi: {e}")
+        
+        # Kullanıcıya yeni bir mesaj göndermek yerine, daha az müdahaleci bir pop-up göster
+        await query.answer(
+            "Bu quiz oturumu zaten tamamlandı veya süresi doldu. Yeni bir quiz için /start yazın.",
+            show_alert=True # Pop-up olarak göster
+        )
         return
 
     question_id = user_db_info[0]
@@ -374,37 +396,27 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if is_correct:
             context.user_data[user_id]['current_quiz_correct_answers'] += 1
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        # correct_answer zaten metin olarak saklandığı için doğrudan çekiyoruz
-        cursor.execute("SELECT correct_answer, text FROM questions WHERE id = ?", (question_id,))
-        correct_ans_db, q_text = cursor.fetchone()
-        conn.close()
-
-        result_message = "Doğru! 🎉" if is_correct else f"Yanlış. Doğru cevap: *{correct_ans_db}*"
-        if explanation:
-            result_message += f"\n\nAçıklama:\n{explanation}"
-
-        full_response_text = f"**Soru:** {q_text}\n\n{result_message}"
+        # Önceki soru mesajını SİLMİYORUZ (istek üzerine kaldırıldı)
+        # last_message_id = context.user_data[user_id].get('last_question_message_id')
+        # if last_message_id:
+        #     try:
+        #         await context.bot.delete_message(chat_id=user_id, message_id=last_message_id)
+        #         logger.info(f"Önceki soru mesajı {last_message_id} kullanıcı {user_id} için silindi.")
+        #     except Exception as e:
+        #         logger.warning(f"Önceki mesaj {last_message_id} kullanıcı {user_id} için silinemedi: {e}")
         
-        try:
-            last_message_id = context.user_data[user_id].get('last_question_message_id')
-            if query.message.photo:
-                await context.bot.edit_message_caption(chat_id=user_id, message_id=last_message_id, caption=full_response_text, reply_markup=None, parse_mode='Markdown')
-            else:
-                await context.bot.edit_message_text(chat_id=user_id, message_id=last_message_id, text=full_response_text, reply_markup=None, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Cevap gönderimi sırasında mesaj düzenlenemedi: {e}")
-
-        await update_user_state_and_question(context, user_id, 'main_menu')
+        # Kullanıcının seçili seçeneklerini temizle
         context.user_data[user_id].pop("selected_options", None)
+        # Yeni soru için başlangıç zamanını güncelle
         context.user_data[user_id]['start_time'] = time.time()
 
         if context.user_data[user_id]['current_quiz_questions_answered'] >= QUIZ_LENGTH:
-            await show_quiz_summary(update, context)
+            logger.info(f"Kullanıcı {user_id} için quiz tamamlandı. Özet gösteriliyor.")
+            await show_quiz_summary(update, context) # show_quiz_summary Update objesi bekliyor
         else:
-            # Sonraki soruyu sormak için query nesnesini kullan
-            await ask_question(query, context)
+            logger.info(f"Kullanıcı {user_id} için yeni soru gönderiliyor. Mevcut soru sayısı: {context.user_data[user_id]['current_quiz_questions_answered']}")
+            # Sonraki soruyu sormak için user_id ve chat_id'yi kullan
+            await ask_question(user_id, chat_id, context)
         return
         
 # --- Ek Özellik İşleyicileri (Bu fonksiyonlarda değişiklik yapılmadı) ---
@@ -491,18 +503,36 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
         await query.edit_message_text("Üzgünüm, bu sorunun detayları bulunamadı.")
         return
 
-    q_text, correct_answer, explanation, image_path, options_json = q_data
-    user_answer = user_answer_data[0] if user_answer_data else "Bulunamadı"
+    q_text, correct_answer_text, explanation, image_path, options_json = q_data
+    user_answer_raw = user_answer_data[0] if user_answer_data else "Bulunamadı"
     
     # Şıkları formatlayarak mesajın içine ekliyoruz
     options_list = json.loads(options_json)
     options_display = "\n".join(options_list)
 
+    # Kullanıcının cevabını şık formatına dönüştür
+    user_answer_formatted = []
+    user_answers_split = user_answer_raw.split(',')
+    for ua_text in user_answers_split:
+        found = False
+        for opt_full_text in options_list:
+            # Şık metnini al (örn: "A) Manastır" -> "Manastır")
+            opt_clean_text = opt_full_text[opt_full_text.find(')') + 2:]
+            if ua_text.strip() == opt_clean_text.strip():
+                user_answer_formatted.append(opt_full_text) # "A) Manastır" gibi
+                found = True
+                break
+        if not found:
+            user_answer_formatted.append(ua_text) # Eğer eşleşme bulunamazsa ham metni kullan
+    
+    user_answer_display = ", ".join(user_answer_formatted)
+
+
     detail_message = (
         f"**Soru:** {q_text}\n\n"
         f"**Şıklar:**\n{options_display}\n\n" # Şıkları buraya ekledik
-        f"**Senin Cevabın:** `{user_answer}`\n"
-        f"**Doğru Cevap:** *{correct_answer}*\n\n"
+        f"**Senin Cevabın:** `{user_answer_display}`\n" # Güncellenmiş format
+        f"**Doğru Cevap:** *{correct_answer_text}*\n\n" # Metin olarak kalır
         f"**Açıklama:**\n{explanation}"
     )
     
