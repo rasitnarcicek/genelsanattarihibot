@@ -2,7 +2,7 @@ import sqlite3
 import json
 import logging
 import string
-import random # random modülünü ekledik
+import random 
 
 # Loglama ayarları
 logging.basicConfig(
@@ -115,30 +115,29 @@ def process_question_options(question):
     
     # Eğer correct_answer hala harf içeriyorsa (eski veriden kalma), bunu metne dönüştür
     # "F" zaten "Hiçbiri" metnine dönüştürüldüğü için bu kontrol daha çok diğer harfler içindir.
-    if all(len(ans) == 1 and ans in string.ascii_uppercase for ans in current_correct_answers_texts):
-        converted_answers = []
-        for ans_letter in current_correct_answers_texts:
-            # letter_to_option_map'in güncel şık sırasına göre oluşturulduğunu unutmayın
-            # bu nedenle, correct_answer'ı şık metnine dönüştürürken,
-            # orijinal şık metinlerini kullanmalıyız, yeni karıştırılmış haritalamayı değil.
-            # Bu durum, correct_answer'ın zaten metin olarak saklanması kararını pekiştiriyor.
-            # Ancak, eğer doğru cevap hala harf olarak geliyorsa, onu bulmak için tüm seçenekleri kontrol etmeliyiz.
+    # Bu kısım, correct_answer'ın artık doğrudan metin olarak saklanması nedeniyle basitleştirilebilir.
+    # Ancak, mevcut yapıyı koruyarak sadece "F" durumunu ele alalım.
+    converted_answers = []
+    for ans_part in current_correct_answers_texts:
+        if ans_part == 'F':
+            converted_answers.append("Hiçbiri")
+        elif len(ans_part) == 1 and ans_part in string.ascii_uppercase: # Hala harf formatında gelirse
             found_text = None
-            for original_opt in original_options_list:
-                if original_opt.startswith(ans_letter + ')'):
-                    found_text = original_opt[original_opt.find(')') + 2:]
+            for original_opt in original_options_list: # Orijinal şık listesinde ara
+                if original_opt.startswith(ans_part + ')'):
+                    found_text = original_opt[original_opt.find(')') + 2:].strip()
                     break
             if found_text:
                 converted_answers.append(found_text)
             else:
-                # Eğer harf "F" ise ve "Hiçbiri" metni varsa
-                if ans_letter == 'F' and "Hiçbiri" in cleaned_options_text:
-                    converted_answers.append("Hiçbiri")
-                else:
-                    logger.warning(f"Soru metni: '{question['text']}' için geçersiz doğru cevap harfi dönüştürme: {ans_letter}")
-                    converted_answers.append(ans_letter) # Fallback
-        question["correct_answer"] = ",".join(converted_answers)
+                converted_answers.append(ans_part) # Bulamazsa olduğu gibi bırak
+        else: # Zaten metin formatındaysa
+            converted_answers.append(ans_part)
+            
+    question["correct_answer"] = ",".join(converted_answers)
 
+    # Tüm soruları double_choice olarak ayarla
+    question["answer_type"] = "double_choice"
 
     return question
 

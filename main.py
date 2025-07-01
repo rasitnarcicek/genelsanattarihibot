@@ -65,7 +65,7 @@ def setup_database_on_startup():
     ''')
     conn.commit()
     conn.close()
-    logger.info("Kullanıcı veritabanı tabloları doğrulandı veya oluşturuldu.")
+    logger.info("Veritabanı tabloları doğrulandı veya oluşturuldu.")
 
 # --- Durum Yönetimi & Ana Mantık ---
 
@@ -336,25 +336,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         selected_option_letter = data.split('_')[2]
         selected_options = context.user_data[user_id].setdefault("selected_options", [])
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT answer_type FROM questions WHERE id = ?", (question_id,))
-        answer_type = cursor.fetchone()[0] # Get answer_type
-        conn.close()
-
-        if answer_type == "single_choice":
-            if selected_option_letter in selected_options:
-                # If the same option is clicked again, deselect it
-                selected_options.remove(selected_option_letter)
-            else:
-                # For single choice, only one option can be selected. Clear others.
-                selected_options.clear() # Clear previous selections
-                selected_options.append(selected_option_letter)
-        elif answer_type == "double_choice": # Or any other multi-choice type
-            if selected_option_letter in selected_options:
-                selected_options.remove(selected_option_letter)
-            else:
-                selected_options.append(selected_option_letter)
+        # answer_type'ı artık kontrol etmiyoruz, tüm sorular çoktan seçmeli gibi davranacak
+        if selected_option_letter in selected_options:
+            selected_options.remove(selected_option_letter)
+        else:
+            selected_options.append(selected_option_letter)
         
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -528,25 +514,20 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
     user_answer_formatted = []
     user_answers_split = user_answer_raw.split(',')
     
-    # Tek cevaplı sorularda kullanıcının birden fazla şık seçmiş olma ihtimalini yönet
-    if answer_type == "single_choice" and len(user_answers_split) > 1:
-        # Eğer tek cevaplı bir soruda birden fazla cevap kaydedilmişse (eski veriden),
-        # sadece ilkini veya en uygun olanı şık formatında göster.
-        # Ya da sadece metin olarak gösterip karışıklığı önleyebiliriz.
-        # Burada sadece metin olarak göstermeyi tercih ediyorum, çünkü şık harfi yanıltıcı olabilir.
-        user_answer_display = user_answer_raw # Sadece ham metni göster
-    else:
-        for ua_text in user_answers_split:
-            found = False
-            for opt_full_text in options_list:
-                opt_clean_text = opt_full_text[opt_full_text.find(')') + 2:].strip()
-                if ua_text.strip() == opt_clean_text:
-                    user_answer_formatted.append(opt_full_text) # "A) Manastır" gibi
-                    found = True
-                    break
-            if not found:
-                user_answer_formatted.append(ua_text) # Eğer eşleşme bulunamazsa ham metni kullan
-        user_answer_display = ", ".join(user_answer_formatted)
+    # answer_type'ı artık kontrol etmiyoruz, her zaman şık harfiyle göstermeye çalışacağız.
+    # Ancak, eğer user_answer_raw tek bir metin ve şıklarda eşleşmiyorsa, ham metni göster.
+    for ua_text in user_answers_split:
+        found = False
+        for opt_full_text in options_list:
+            opt_clean_text = opt_full_text[opt_full_text.find(')') + 2:].strip()
+            if ua_text.strip() == opt_clean_text:
+                user_answer_formatted.append(opt_full_text) # "A) Manastır" gibi
+                found = True
+                break
+        if not found:
+            user_answer_formatted.append(ua_text) # Eğer eşleşme bulunamazsa ham metni kullan
+    
+    user_answer_display = ", ".join(user_answer_formatted)
 
 
     detail_message = (
