@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 TOKEN = '7637232124:AAFEttWDFijHYXbNdp4ZZGbxfQ3I85pY-xE' 
 
 # ÖNEMLİ: Geri bildirim almak için kendi Telegram Kullanıcı ID'niz ile değiştirin.
-# Geri bildirim özelliğini kullanmak istemiyorsanız, bu değeri 0 olarak bırakabilirsiniz.
 FEEDBACK_ADMIN_ID = 946918816 
 
 # --- Quiz Ayarları ---
@@ -34,25 +33,11 @@ def get_db_connection():
 
 def setup_database_on_startup():
     """
-    Bot başladığında gerekli veritabanı tablolarının mevcut olmasını sağlar.
-    Bu fonksiyonu her bot başlangıcında çalıştırmak güvenlidir.
+    Bot başladığında kullanıcı verilerini tutan tabloların mevcut olmasını sağlar.
+    'questions' tablosu artık seed_db.py tarafından yönetilmektedir.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
-    # questions tablosu: Tüm quiz sorularını saklar.
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS questions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            image_path TEXT,
-            answer_type TEXT NOT NULL,
-            correct_answer TEXT NOT NULL,
-            options TEXT,
-            explanation TEXT,
-            topic TEXT,
-            difficulty INTEGER
-        )
-    ''')
     # users tablosu: Kullanıcı bilgilerini ve mevcut durumlarını saklar.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -79,7 +64,7 @@ def setup_database_on_startup():
     ''')
     conn.commit()
     conn.close()
-    logger.info("Veritabanı tabloları doğrulandı veya oluşturuldu.")
+    logger.info("Kullanıcı veritabanı tabloları doğrulandı veya oluşturuldu.")
 
 # --- Durum Yönetimi & Ana Mantık ---
 
@@ -135,47 +120,46 @@ async def check_answer(question_id: int, user_answer: str, user_id: int, start_t
 # --- Komut İşleyicileri ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Kullanıcı /start komutunu gönderdiğinde yanıt verir."""
+    """Kullanıcı /start komutunu gönderdiğinde sınav seçimi menüsünü gösterir."""
     user = update.effective_user
     await update_user_state_and_question(context, user.id, 'main_menu', username=user.username)
 
+    keyboard = [
+        [InlineKeyboardButton("Vize Sınavı", callback_data="start_quiz_Vize")],
+        [InlineKeyboardButton("Final Sınavı", callback_data="start_quiz_Final")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_html(
         rf"Sanat Tarihi dersine hoş geldin, {user.mention_html()}! "
-        "Başlamaya hazır olduğunda /soru komutunu gönder."
+        "Lütfen başlamak istediğin sınav türünü seç:",
+        reply_markup=reply_markup
     )
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Kullanıcıya rastgele bir sanat tarihi sorusu gönderir."""
+    """Kullanıcının seçtiği sınav türüne göre rastgele bir soru gönderir."""
     user_id = update.effective_user.id
     logger.debug(f"ask_question fonksiyonu kullanıcı {user_id} için çağrıldı.")
 
     if user_id not in context.user_data:
         context.user_data[user_id] = {}
 
-    force_reset = context.user_data[user_id].pop('force_quiz_reset', False)
-    is_new_command = update.message and update.message.text == "/soru"
-    
-    questions_answered = context.user_data[user_id].get('current_quiz_questions_answered', 0)
+    # Kullanıcının hangi sınavı seçtiğini kontrol et
+    sinav_turu = context.user_data[user_id].get('sinav_turu')
+    if not sinav_turu:
+        await context.bot.send_message(chat_id=user_id, text="Lütfen önce bir sınav türü seçmek için /start komutunu kullanın.")
+        return
 
-    if questions_answered == 0 or force_reset or is_new_command:
-        logger.debug(f"Kullanıcı {user_id} quizi başlatıyor veya yeniden başlatıyor. Sayaçlar sıfırlanıyor.")
-        context.user_data[user_id].update({
-            'current_quiz_questions_answered': 0,
-            'current_quiz_correct_answers': 0,
-            'current_quiz_start_time': time.time(),
-            'start_time': time.time()
-        })
-    
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, text, image_path, options FROM questions ORDER BY RANDOM() LIMIT 1")
+    # Sadece seçilen sınav türüne ait soruları getir
+    cursor.execute("SELECT id, text, image_path, options FROM questions WHERE sinav_turu = ? ORDER BY RANDOM() LIMIT 1", (sinav_turu,))
     question_data = cursor.fetchone()
     conn.close()
 
     if not question_data:
-        logger.warning(f"Kullanıcı {user_id} için veritabanında soru bulunamadı. Lütfen önce seed_db.py dosyasını çalıştırın.")
-        chat_id = update.effective_chat.id
-        await context.bot.send_message(chat_id=chat_id, text="Üzgünüm, şu anda mevcut bir soru yok.")
+        logger.warning(f"Kullanıcı {user_id} için '{sinav_turu}' türünde soru bulunamadı.")
+        await context.bot.send_message(chat_id=user_id, text=f"Üzgünüm, '{sinav_turu}' sınavı için şu anda mevcut bir soru yok.")
         return
 
     question_id, question_text, image_path, options_json = question_data
@@ -218,14 +202,40 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.user_data[user_id]['last_question_message_id'] = sent_message.message_id
         logger.info(f"Soru ID {question_id}, kullanıcı {user_id}'e gönderildi. Mesaj ID: {sent_message.message_id}")
 
+async def soru_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/soru komutu için yönlendirme yapar."""
+    await update.message.reply_text(
+        "Yeni bir quiz başlatmak için lütfen /start komutunu kullanıp sınav türü seçin."
+    )
+
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Bilinmeyen komutları veya metin mesajlarını işler."""
     if update.message and update.message.text.startswith('/'):
-        await update.message.reply_text("Üzgünüm, bu komutu anlamadım.")
+        await update.message.reply_text("Üzgünüm, bu komutu anlamadım. Komut listesi için /help yazabilirsiniz.")
     else:
-        await update.message.reply_text("Şu anda bir cevap beklemiyorum. Yeni bir quiz başlatmak için /soru yaz.")
+        await update.message.reply_text("Şu anda bir cevap beklemiyorum. Yeni bir quiz başlatmak için /start yaz.")
 
 # --- Callback Query (Buton Tıklama) İşleyicileri ---
+
+async def select_quiz_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kullanıcının sınav türü seçimini işler ve quizi başlatır."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    sinav_turu = query.data.split('_')[2] # "start_quiz_Vize" -> "Vize"
+
+    await query.edit_message_text(f"Harika! **{sinav_turu} Sınavı** başlatılıyor...")
+
+    # Quiz için kullanıcı verilerini sıfırla ve sınav türünü kaydet
+    context.user_data[user_id] = {
+        'sinav_turu': sinav_turu,
+        'current_quiz_questions_answered': 0,
+        'current_quiz_correct_answers': 0,
+        'current_quiz_start_time': time.time(),
+        'start_time': time.time()
+    }
+    
+    # İlk soruyu sor
+    await ask_question(update, context)
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Tüm inline buton tıklamaları için ana yönlendiricidir."""
@@ -235,17 +245,21 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     try:
         await query.answer()
-    except BadRequest:
-        logger.warning(f"Callback query ({query.id}) zaten cevaplanmış.")
+    except BadRequest as e:
+        if "query is too old" not in str(e):
+             logger.warning(f"Callback query ({query.id}) cevaplanamadı: {e}")
     except Exception as e:
         logger.error(f"Kullanıcı {user_id} için callback query cevaplanamadı: {e}")
 
     # --- Gelen callback verisine göre ilgili fonksiyona yönlendir ---
-    
+    if data.startswith("start_quiz_"):
+        await select_quiz_type(update, context)
+        return
+        
     if data == "start_new_quiz":
-        await query.edit_message_text("Yeni quiz başlatılıyor...")
-        context.user_data[user_id]['force_quiz_reset'] = True
-        await ask_question(update, context)
+        # Kullanıcıyı ana menüye yönlendirerek sınav seçmesini sağla
+        await query.edit_message_text("Yeni bir quiz başlatmak için lütfen sınav türü seçin.")
+        await start(query, context) # start fonksiyonunu çağırarak menüyü göster
         return
 
     if data == "review_wrong_answers" or data == "review_wrong_answers_list":
@@ -263,7 +277,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # --- Ana Quiz Cevaplama Mantığı ---
-    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT current_question_id, state FROM users WHERE id = ?", (user_id,))
@@ -272,7 +285,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not user_db_info or user_db_info[1] != 'waiting_for_answer' or user_db_info[0] is None:
         logger.warning(f"Kullanıcı {user_id} bir quiz butonuna tıkladı ama 'waiting_for_answer' durumunda değil.")
-        await query.edit_message_text("Şu anda bir soru yanıtlamıyorsun veya bu soru zaten yanıtlandı. Yeni bir quiz için /soru yaz.")
+        if query.message:
+            await query.edit_message_text("Bu soru zaten yanıtlandı. Yeni bir quiz için /start yaz.")
         return
 
     question_id = user_db_info[0]
@@ -282,25 +296,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         selected_option_letter = data.split('_')[2]
         selected_options = context.user_data[user_id].setdefault("selected_options", [])
         
-        if selected_option_letter.upper() == 'F':
-            if 'F' in selected_options:
-                selected_options.clear()
-            else:
-                selected_options.clear()
-                selected_options.append('F')
+        # Çoktan seçmeli mantığı
+        if selected_option_letter in selected_options:
+            selected_options.remove(selected_option_letter)
         else:
-            if 'F' in selected_options:
-                selected_options.remove('F')
-            
-            if selected_option_letter in selected_options:
-                selected_options.remove(selected_option_letter)
-            else:
-                selected_options.append(selected_option_letter)
+            selected_options.append(selected_option_letter)
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT text, options FROM questions WHERE id = ?", (question_id,))
-        q_text, q_options_json = cursor.fetchone()
+        cursor.execute("SELECT text, options, sinav_turu FROM questions WHERE id = ?", (question_id,))
+        q_text, q_options_json, sinav_turu = cursor.fetchone()
         conn.close()
         original_options = json.loads(q_options_json)
 
@@ -313,7 +318,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         updated_keyboard.append([InlineKeyboardButton("Cevabı Onayla", callback_data="submit_answer")])
         
         current_q_count = context.user_data[user_id].get('current_quiz_questions_answered', 0) + 1
-        q_text_edit = f"**Soru {current_q_count}/{QUIZ_LENGTH}:**\n{q_text}"
+        q_text_edit = f"**{sinav_turu} Sınavı - Soru {current_q_count}/{QUIZ_LENGTH}:**\n{q_text}"
         selected_str = ", ".join(sorted(selected_options)) or "Hiçbiri"
         full_caption = f"{q_text_edit}\n\nSeçilen: *{selected_str}*"
 
@@ -325,7 +330,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 await context.bot.edit_message_text(chat_id=user_id, message_id=last_message_id, text=full_caption, reply_markup=InlineKeyboardMarkup(updated_keyboard), parse_mode='Markdown')
         except BadRequest as e:
             if "message is not modified" not in str(e):
-                 logger.error(f"Seçenek seçimi sırasında mesaj düzenlenemedi: {e}")
+                logger.error(f"Seçenek seçimi sırasında mesaj düzenlenemedi: {e}")
         return
 
     # Cevap gönderimi
@@ -372,10 +377,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if context.user_data[user_id]['current_quiz_questions_answered'] >= QUIZ_LENGTH:
             await show_quiz_summary(update, context)
         else:
-            await ask_question(update, context)
+            # Sonraki soruyu sormak için query nesnesini kullan
+            await ask_question(query, context)
         return
         
-# --- Ek Özellik İşleyicileri ---
+# --- Ek Özellik İşleyicileri (Bu fonksiyonlarda değişiklik yapılmadı) ---
 
 async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Kullanıcının kişisel quiz istatistiklerini gösterir."""
@@ -433,7 +439,6 @@ async def review_wrong_answers(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     await context.bot.send_message(chat_id=chat_id, text=response_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-
 async def handle_wrong_question_review_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Belirli bir yanlış cevaplanmış sorunun tam detaylarını gösterir."""
     query = update.callback_query
@@ -443,11 +448,9 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Soru detaylarını al
     cursor.execute("SELECT text, correct_answer, explanation, image_path FROM questions WHERE id = ?", (question_id,))
     q_data = cursor.fetchone()
     
-    # GÜNCELLEME: Kullanıcının bu soruya verdiği son yanlış cevabı da al
     cursor.execute(
         "SELECT user_answer FROM user_answers WHERE user_id = ? AND question_id = ? AND is_correct = 0 ORDER BY timestamp DESC LIMIT 1",
         (user_id, question_id)
@@ -461,10 +464,8 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
         return
 
     q_text, correct_answer, explanation, image_path = q_data
-    # Kullanıcının cevabı bulunamazsa varsayılan bir metin göster
     user_answer = user_answer_data[0] if user_answer_data else "Bulunamadı"
 
-    # GÜNCELLEME: Mesaj içeriğine kullanıcının cevabını ekle
     detail_message = (
         f"**Soru:** {q_text}\n\n"
         f"**Senin Cevabın:** `{user_answer}`\n"
@@ -472,7 +473,6 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
         f"**Açıklama:**\n{explanation}"
     )
     
-    # Navigasyon butonlarını ekle
     keyboard = [
         [InlineKeyboardButton("Yanlışlarıma Geri Dön", callback_data="review_wrong_answers_list")],
         [InlineKeyboardButton("Yeni Quiz Başlat", callback_data="start_new_quiz")]
@@ -482,10 +482,8 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
     await query.edit_message_text(detail_message, reply_markup=reply_markup, parse_mode='Markdown')
     
     if image_path and os.path.exists(image_path):
-        # Detay mesajı butonlarla gönderildiği için, resmi ayrı bir mesaj olarak gönder
         with open(image_path, 'rb') as photo:
             await context.bot.send_photo(chat_id=query.from_user.id, photo=photo)
-
 
 async def reset_statistics_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """İstatistikleri sıfırlamadan önce onay ister."""
@@ -507,7 +505,7 @@ async def handle_reset_confirmation(update: Update, context: ContextTypes.DEFAUL
         cursor.execute("DELETE FROM user_answers WHERE user_id = ?", (query.from_user.id,))
         conn.commit()
         conn.close()
-        await query.edit_message_text("İstatistiklerin başarıyla sıfırlandı! Yeni bir başlangıç için /soru yaz.")
+        await query.edit_message_text("İstatistiklerin başarıyla sıfırlandı! Yeni bir başlangıç için /start yaz.")
     else:
         await query.edit_message_text("İşlem iptal edildi. İstatistiklerin güvende.")
 
@@ -601,7 +599,7 @@ def main() -> None:
 
     # Komut işleyicileri
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("soru", ask_question))
+    application.add_handler(CommandHandler("soru", soru_command_handler))
     application.add_handler(CommandHandler("istatistik", show_statistics))
     application.add_handler(CommandHandler("yanlislarim", review_wrong_answers))
     application.add_handler(CommandHandler("sifirla", reset_statistics_confirmation))
