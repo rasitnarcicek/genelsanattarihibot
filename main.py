@@ -6,7 +6,7 @@ import sqlite3
 import json
 import time
 import os
-import string # string modülü eklendi
+import string 
 
 # --- Temel Yapılandırma ---
 
@@ -170,9 +170,9 @@ async def ask_question(user_id: int, chat_id: int, context: ContextTypes.DEFAULT
         await context.bot.send_message(chat_id=chat_id, text=f"Üzgünüm, '{sinav_turu}' sınavı için şu anda mevcut bir soru yok. Quiz tamamlandı.")
         # Eğer soru kalmadıysa, quiz'i tamamla ve özeti göster
         context.user_data[user_id]['current_quiz_questions_answered'] = QUIZ_LENGTH # Quiz'i bitirmek için sayıyı QUIZ_LENGTH'e eşitle
-        # update objesi olmadığı için show_quiz_summary'ye dummy bir update objesi geçirmemiz gerekebilir
-        # veya show_quiz_summary'yi de user_id ve chat_id ile çalışacak şekilde düzenlemeliyiz.
-        # Şimdilik, sadece mesaj gönderip akışı durduruyorum.
+        # show_quiz_summary Update objesi beklediği için, burada doğrudan çağrılmıyor.
+        # Akış, quiz_summary'nin çağrıldığı yerden (submit_answer) devam edecek.
+        # Bu durumda, kullanıcının quiz'i bitmiş sayılır ve yeni bir başlangıç yapması gerekir.
         return
 
     question_id, question_text, image_path, options_json = question_data
@@ -242,6 +242,14 @@ async def select_quiz_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     await query.edit_message_text(f"Harika! **{sinav_turu} Sınavı** başlatılıyor...")
 
+    # Kullanıcıya ait geçmiş cevapları sıfırla
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_answers WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    logger.info(f"Kullanıcı {user_id} için geçmiş cevaplar sıfırlandı.")
+
     # Quiz için kullanıcı verilerini sıfırla ve sınav türünü kaydet
     context.user_data[user_id] = {
         'sinav_turu': sinav_turu,
@@ -308,6 +316,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # Kullanıcının tıkladığı mesajı silmeye çalış (eğer hala varsa)
         if query.message:
             try:
+                # Sadece mesajı silmeye çalış, düzenlemeye değil.
                 await context.bot.delete_message(chat_id=user_id, message_id=query.message.message_id)
                 logger.info(f"Eski mesaj {query.message.message_id} kullanıcı {user_id} için silindi.")
             except Exception as e:
@@ -327,11 +336,25 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         selected_option_letter = data.split('_')[2]
         selected_options = context.user_data[user_id].setdefault("selected_options", [])
         
-        # Çoktan seçmeli mantığı
-        if selected_option_letter in selected_options:
-            selected_options.remove(selected_option_letter)
-        else:
-            selected_options.append(selected_option_letter)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT answer_type FROM questions WHERE id = ?", (question_id,))
+        answer_type = cursor.fetchone()[0] # Get answer_type
+        conn.close()
+
+        if answer_type == "single_choice":
+            if selected_option_letter in selected_options:
+                # If the same option is clicked again, deselect it
+                selected_options.remove(selected_option_letter)
+            else:
+                # For single choice, only one option can be selected. Clear others.
+                selected_options.clear() # Clear previous selections
+                selected_options.append(selected_option_letter)
+        elif answer_type == "double_choice": # Or any other multi-choice type
+            if selected_option_letter in selected_options:
+                selected_options.remove(selected_option_letter)
+            else:
+                selected_options.append(selected_option_letter)
         
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -384,7 +407,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         for letter in user_selected_letters:
             for option_full_text in all_options:
                 if option_full_text.startswith(f"{letter})"):
-                    user_answer_texts.append(option_full_text[option_full_text.find(')') + 2:])
+                    user_answer_texts.append(option_full_text[option_full_text.find(')') + 2:].strip()) 
                     break
         
         user_answer_str = ",".join(user_answer_texts)
@@ -396,15 +419,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if is_correct:
             context.user_data[user_id]['current_quiz_correct_answers'] += 1
 
-        # Önceki soru mesajını SİLMİYORUZ (istek üzerine kaldırıldı)
-        # last_message_id = context.user_data[user_id].get('last_question_message_id')
-        # if last_message_id:
-        #     try:
-        #         await context.bot.delete_message(chat_id=user_id, message_id=last_message_id)
-        #         logger.info(f"Önceki soru mesajı {last_message_id} kullanıcı {user_id} için silindi.")
-        #     except Exception as e:
-        #         logger.warning(f"Önceki mesaj {last_message_id} kullanıcı {user_id} için silinemedi: {e}")
-        
         # Kullanıcının seçili seçeneklerini temizle
         context.user_data[user_id].pop("selected_options", None)
         # Yeni soru için başlangıç zamanını güncelle
@@ -412,7 +426,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         if context.user_data[user_id]['current_quiz_questions_answered'] >= QUIZ_LENGTH:
             logger.info(f"Kullanıcı {user_id} için quiz tamamlandı. Özet gösteriliyor.")
-            await show_quiz_summary(update, context) # show_quiz_summary Update objesi bekliyor
+            await show_quiz_summary(update, context) 
         else:
             logger.info(f"Kullanıcı {user_id} için yeni soru gönderiliyor. Mevcut soru sayısı: {context.user_data[user_id]['current_quiz_questions_answered']}")
             # Sonraki soruyu sormak için user_id ve chat_id'yi kullan
@@ -488,7 +502,7 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
     cursor = conn.cursor()
     
     # Şıkları da çekiyoruz
-    cursor.execute("SELECT text, correct_answer, explanation, image_path, options FROM questions WHERE id = ?", (question_id,))
+    cursor.execute("SELECT text, correct_answer, explanation, image_path, options, answer_type FROM questions WHERE id = ?", (question_id,))
     q_data = cursor.fetchone()
     
     cursor.execute(
@@ -503,7 +517,7 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
         await query.edit_message_text("Üzgünüm, bu sorunun detayları bulunamadı.")
         return
 
-    q_text, correct_answer_text, explanation, image_path, options_json = q_data
+    q_text, correct_answer_text, explanation, image_path, options_json, answer_type = q_data
     user_answer_raw = user_answer_data[0] if user_answer_data else "Bulunamadı"
     
     # Şıkları formatlayarak mesajın içine ekliyoruz
@@ -513,19 +527,26 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
     # Kullanıcının cevabını şık formatına dönüştür
     user_answer_formatted = []
     user_answers_split = user_answer_raw.split(',')
-    for ua_text in user_answers_split:
-        found = False
-        for opt_full_text in options_list:
-            # Şık metnini al (örn: "A) Manastır" -> "Manastır")
-            opt_clean_text = opt_full_text[opt_full_text.find(')') + 2:]
-            if ua_text.strip() == opt_clean_text.strip():
-                user_answer_formatted.append(opt_full_text) # "A) Manastır" gibi
-                found = True
-                break
-        if not found:
-            user_answer_formatted.append(ua_text) # Eğer eşleşme bulunamazsa ham metni kullan
     
-    user_answer_display = ", ".join(user_answer_formatted)
+    # Tek cevaplı sorularda kullanıcının birden fazla şık seçmiş olma ihtimalini yönet
+    if answer_type == "single_choice" and len(user_answers_split) > 1:
+        # Eğer tek cevaplı bir soruda birden fazla cevap kaydedilmişse (eski veriden),
+        # sadece ilkini veya en uygun olanı şık formatında göster.
+        # Ya da sadece metin olarak gösterip karışıklığı önleyebiliriz.
+        # Burada sadece metin olarak göstermeyi tercih ediyorum, çünkü şık harfi yanıltıcı olabilir.
+        user_answer_display = user_answer_raw # Sadece ham metni göster
+    else:
+        for ua_text in user_answers_split:
+            found = False
+            for opt_full_text in options_list:
+                opt_clean_text = opt_full_text[opt_full_text.find(')') + 2:].strip()
+                if ua_text.strip() == opt_clean_text:
+                    user_answer_formatted.append(opt_full_text) # "A) Manastır" gibi
+                    found = True
+                    break
+            if not found:
+                user_answer_formatted.append(ua_text) # Eğer eşleşme bulunamazsa ham metni kullan
+        user_answer_display = ", ".join(user_answer_formatted)
 
 
     detail_message = (
