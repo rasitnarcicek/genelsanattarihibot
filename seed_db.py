@@ -1,6 +1,8 @@
 import sqlite3
 import json
 import logging
+import string
+import random # random modülünü ekledik
 
 # Loglama ayarları
 logging.basicConfig(
@@ -24,7 +26,7 @@ def setup_database():
             text TEXT NOT NULL,
             image_path TEXT,
             answer_type TEXT NOT NULL,
-            correct_answer TEXT NOT NULL,
+            correct_answer TEXT NOT NULL, -- Bu sütun artık şık metnini saklayacak
             options TEXT,
             explanation TEXT,
             donem TEXT,
@@ -58,6 +60,87 @@ def setup_database():
     conn.commit()
     conn.close()
     logger.info("Veritabanı tabloları kontrol edildi/oluşturuldu.")
+
+def process_question_options(question):
+    """
+    Her soruya 'F) Hiçbiri' seçeneğini ekler ve şıkları büyük harf A) B) şeklinde yeniden düzenler.
+    Ayrıca, açıklaması 'doğru cevap yoktu' anlamına gelen soruların doğru cevabını 'F' olarak ayarlar.
+    Son olarak, correct_answer'ı şık harfinden şık metnine dönüştürür.
+    Şıkları rastgele karıştırır.
+    """
+    original_options_list = json.loads(question["options"])
+    
+    # Mevcut şıklardaki harfleri temizle ve sadece metni al
+    cleaned_options_text = [opt[opt.find(')') + 2:] if ')' in opt else opt for opt in original_options_list]
+    
+    # Eğer 'Hiçbiri' seçeneği yoksa ekle
+    if "Hiçbiri" not in cleaned_options_text:
+        cleaned_options_text.append("Hiçbiri")
+
+    # Şıkları karıştır
+    random.shuffle(cleaned_options_text)
+
+    # Şıkları A) B) C) ... şeklinde yeniden etiketle ve geçici bir harf-metin haritası oluştur
+    new_options_with_letters = []
+    letter_to_option_map = {}
+    for i, opt_text in enumerate(cleaned_options_text):
+        current_letter = string.ascii_uppercase[i]
+        new_options_with_letters.append(f"{current_letter}) {opt_text}")
+        letter_to_option_map[current_letter] = opt_text
+    
+    question["options"] = json.dumps(new_options_with_letters)
+
+    # Açıklamada "doğru cevap yoktur" veya "bulunmamaktadır" gibi ifadeler varsa,
+    # correct_answer'ı "F" olarak ayarla.
+    explanation_lower = question["explanation"].lower()
+    if any(phrase in explanation_lower for phrase in [
+        "seçeneklerde romanesk dönem bulunmamaktadır",
+        "seçeneklerde gotik dönemi yer almamaktadır",
+        "seçeneklerde bizans dönemi yer almamaktadır",
+        "seçeneklerde antik roma dönemi verilmemiştir",
+        "seçeneklerde rönesans dönemi verilmemiştir",
+        "verilen şıklardan hiçbiri doğru değildir",
+        "leonardo da vinci seçenekler arasında yer almamaktadır",
+        "verilen sanatçılardan hiçbiri maniyerist dönemin tipik temsilcilerinden değildir",
+        "şıklar arasında bu sanatçılar yer almamaktadır",
+        "en uygun cevap olan maniyerizm şıklarda yer almadığı için doğru cevap yoktur",
+        "verilen seçeneklerde doğru eşleştirme yoktur"
+    ]):
+        question["correct_answer"] = "Hiçbiri" # Metin olarak "Hiçbiri" olarak ayarla
+    
+    # Şimdi correct_answer'ı şık harfinden şık metnine dönüştür (eğer daha önce harf olarak ayarlanmışsa)
+    # Bu adım, correct_answer zaten metin olarak ayarlandığı için genellikle gereksizdir,
+    # ancak orijinal veride harf varsa uyumluluk için tutulmuştur.
+    current_correct_answers_texts = question["correct_answer"].split(',')
+    
+    # Eğer correct_answer hala harf içeriyorsa (eski veriden kalma), bunu metne dönüştür
+    # "F" zaten "Hiçbiri" metnine dönüştürüldüğü için bu kontrol daha çok diğer harfler içindir.
+    if all(len(ans) == 1 and ans in string.ascii_uppercase for ans in current_correct_answers_texts):
+        converted_answers = []
+        for ans_letter in current_correct_answers_texts:
+            # letter_to_option_map'in güncel şık sırasına göre oluşturulduğunu unutmayın
+            # bu nedenle, correct_answer'ı şık metnine dönüştürürken,
+            # orijinal şık metinlerini kullanmalıyız, yeni karıştırılmış haritalamayı değil.
+            # Bu durum, correct_answer'ın zaten metin olarak saklanması kararını pekiştiriyor.
+            # Ancak, eğer doğru cevap hala harf olarak geliyorsa, onu bulmak için tüm seçenekleri kontrol etmeliyiz.
+            found_text = None
+            for original_opt in original_options_list:
+                if original_opt.startswith(ans_letter + ')'):
+                    found_text = original_opt[original_opt.find(')') + 2:]
+                    break
+            if found_text:
+                converted_answers.append(found_text)
+            else:
+                # Eğer harf "F" ise ve "Hiçbiri" metni varsa
+                if ans_letter == 'F' and "Hiçbiri" in cleaned_options_text:
+                    converted_answers.append("Hiçbiri")
+                else:
+                    logger.warning(f"Soru metni: '{question['text']}' için geçersiz doğru cevap harfi dönüştürme: {ans_letter}")
+                    converted_answers.append(ans_letter) # Fallback
+        question["correct_answer"] = ",".join(converted_answers)
+
+
+    return question
 
 def insert_sample_questions():
     """Veritabanına sadece belirtilen soruları ekler."""
@@ -525,7 +608,10 @@ def insert_sample_questions():
         }
     ]
 
-    for q in questions_to_insert:
+    # Her soruyu işle
+    processed_questions = [process_question_options(q) for q in questions_to_insert]
+
+    for q in processed_questions:
         cursor.execute(
             "INSERT INTO questions (text, image_path, answer_type, correct_answer, options, explanation, donem, sinav_turu) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (q["text"], q["image_path"], q["answer_type"], q["correct_answer"], q["options"], q["explanation"], q["donem"], q["sinav_turu"])
@@ -533,7 +619,7 @@ def insert_sample_questions():
     
     conn.commit()
     conn.close()
-    logger.info(f"{len(questions_to_insert)} adet soru (vize ve final) veritabanına eklendi.")
+    logger.info(f"{len(processed_questions)} adet soru (vize ve final) veritabanına eklendi.")
 
 if __name__ == '__main__':
     setup_database()

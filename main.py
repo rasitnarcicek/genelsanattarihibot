@@ -6,6 +6,7 @@ import sqlite3
 import json
 import time
 import os
+import string # string modülü eklendi
 
 # --- Temel Yapılandırma ---
 
@@ -91,6 +92,7 @@ async def check_answer(question_id: int, user_answer: str, user_id: int, start_t
     """Kullanıcının cevabını doğru olanla karşılaştırır ve veritabanına kaydeder."""
     conn = get_db_connection()
     cursor = conn.cursor()
+    # correct_answer artık şık metni olarak saklanıyor
     cursor.execute("SELECT correct_answer, explanation FROM questions WHERE id = ?", (question_id,))
     question_info = cursor.fetchone()
 
@@ -99,8 +101,14 @@ async def check_answer(question_id: int, user_answer: str, user_id: int, start_t
         conn.close()
         return False, "Bu soru veritabanında bulunamadı."
 
-    correct_answer, explanation = question_info
-    is_correct = (user_answer == correct_answer)
+    correct_answer_text_db, explanation = question_info
+    
+    # Çoklu doğru cevapları ve kullanıcının cevaplarını setlere dönüştürerek karşılaştır
+    # Sıra önemli olmadığı için set kullanmak daha güvenli
+    correct_answers_set = set(correct_answer_text_db.split(','))
+    user_answers_set = set(user_answer.split(',')) # user_answer zaten metin olarak gelecek
+
+    is_correct = (user_answers_set == correct_answers_set)
     answer_time_seconds = int(time.time() - start_time) if start_time else None
 
     try:
@@ -169,6 +177,7 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     keyboard = []
     for option_text in options:
+        # Şık metninden harfi ayırıyoruz (örn: "A) Manastır" -> "A")
         option_letter = option_text.split(')')[0].strip()
         keyboard.append([InlineKeyboardButton(option_text, callback_data=f"select_option_{option_letter}")])
     
@@ -307,10 +316,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         cursor.execute("SELECT text, options, sinav_turu FROM questions WHERE id = ?", (question_id,))
         q_text, q_options_json, sinav_turu = cursor.fetchone()
         conn.close()
-        original_options = json.loads(q_options_json)
+        original_options_with_letters = json.loads(q_options_json) # Şıklar A) B) C) formatında
 
         updated_keyboard = []
-        for opt_text in original_options:
+        for opt_text in original_options_with_letters:
             opt_letter = opt_text.split(')')[0].strip()
             btn_text = "✅ " + opt_text if opt_letter in selected_options else opt_text
             updated_keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"select_option_{opt_letter}")])
@@ -319,7 +328,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         
         current_q_count = context.user_data[user_id].get('current_quiz_questions_answered', 0) + 1
         q_text_edit = f"**{sinav_turu} Sınavı - Soru {current_q_count}/{QUIZ_LENGTH}:**\n{q_text}"
-        selected_str = ", ".join(sorted(selected_options)) or "Hiçbiri"
+        selected_str = ", ".join(sorted(selected_options)) or "Hiçbiri" # Burada hala harfleri gösteriyoruz
         full_caption = f"{q_text_edit}\n\nSeçilen: *{selected_str}*"
 
         try:
@@ -335,12 +344,28 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Cevap gönderimi
     if data == "submit_answer":
-        user_answer_options = sorted(context.user_data[user_id].get("selected_options", []))
-        if not user_answer_options:
+        user_selected_letters = sorted(context.user_data[user_id].get("selected_options", []))
+        if not user_selected_letters:
             await query.answer("Lütfen en az bir seçenek belirle.", show_alert=True)
             return
 
-        user_answer_str = ",".join(user_answer_options)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT options FROM questions WHERE id = ?", (question_id,))
+        options_json = cursor.fetchone()[0]
+        conn.close()
+        
+        all_options = json.loads(options_json)
+        
+        # Seçilen harfleri metin karşılıklarına dönüştür
+        user_answer_texts = []
+        for letter in user_selected_letters:
+            for option_full_text in all_options:
+                if option_full_text.startswith(f"{letter})"):
+                    user_answer_texts.append(option_full_text[option_full_text.find(')') + 2:])
+                    break
+        
+        user_answer_str = ",".join(user_answer_texts)
         start_time = context.user_data[user_id].get('start_time')
         
         is_correct, explanation = await check_answer(question_id, user_answer_str, user_id, start_time)
@@ -351,6 +376,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         conn = get_db_connection()
         cursor = conn.cursor()
+        # correct_answer zaten metin olarak saklandığı için doğrudan çekiyoruz
         cursor.execute("SELECT correct_answer, text FROM questions WHERE id = ?", (question_id,))
         correct_ans_db, q_text = cursor.fetchone()
         conn.close()
@@ -433,7 +459,8 @@ async def review_wrong_answers(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard = []
     for i, (q_id, q_text, correct_ans, user_ans) in enumerate(wrong_questions):
         summary = q_text.split('\n')[0][:50] + "..."
-        response_message += f"*{i+1}. {summary}*\n  Senin cevabın: `{user_ans}`, Doğru: `{correct_ans}`\n"
+        # user_ans ve correct_ans zaten metin olarak saklandığı için doğrudan kullanabiliriz
+        response_message += f"*{i+1}. {summary}*\n  Senin cevabın: `{user_ans}`, Doğru: `{correct_ans}`\n"
         keyboard.append([InlineKeyboardButton(f"Soruyu İncele {i+1}", callback_data=f"review_wrong_detail_{q_id}")])
 
     chat_id = update.effective_chat.id
@@ -448,7 +475,8 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT text, correct_answer, explanation, image_path FROM questions WHERE id = ?", (question_id,))
+    # Şıkları da çekiyoruz
+    cursor.execute("SELECT text, correct_answer, explanation, image_path, options FROM questions WHERE id = ?", (question_id,))
     q_data = cursor.fetchone()
     
     cursor.execute(
@@ -463,11 +491,16 @@ async def handle_wrong_question_review_detail(update: Update, context: ContextTy
         await query.edit_message_text("Üzgünüm, bu sorunun detayları bulunamadı.")
         return
 
-    q_text, correct_answer, explanation, image_path = q_data
+    q_text, correct_answer, explanation, image_path, options_json = q_data
     user_answer = user_answer_data[0] if user_answer_data else "Bulunamadı"
+    
+    # Şıkları formatlayarak mesajın içine ekliyoruz
+    options_list = json.loads(options_json)
+    options_display = "\n".join(options_list)
 
     detail_message = (
         f"**Soru:** {q_text}\n\n"
+        f"**Şıklar:**\n{options_display}\n\n" # Şıkları buraya ekledik
         f"**Senin Cevabın:** `{user_answer}`\n"
         f"**Doğru Cevap:** *{correct_answer}*\n\n"
         f"**Açıklama:**\n{explanation}"
@@ -539,7 +572,7 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Kullanıcı geri bildirimini yöneticiye gönderir."""
     if not FEEDBACK_ADMIN_ID:
         await update.message.reply_text("Geri bildirim özelliği şu anda devre dışı.")
-        return
+    return
 
     if not context.args:
         await update.message.reply_text("Lütfen geri bildiriminizi komuttan sonra yazın, örn: /geri_bildirim Bu bot harika!")
