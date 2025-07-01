@@ -284,8 +284,21 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         
     if data == "start_new_quiz":
         # Kullanıcıyı ana menüye yönlendirerek sınav seçmesini sağla
-        await query.edit_message_text("Yeni bir quiz başlatmak için lütfen sınav türü seçin.")
-        await start(query, context) # start fonksiyonunu çağırarak menüyü göster
+        # query.edit_message_text("Yeni bir quiz başlatmak için lütfen sınav türü seçin.") # Bu satır kaldırıldı veya değiştirildi
+        
+        # Sınav türü seçim butonlarını doğrudan gönder
+        keyboard = [
+            [InlineKeyboardButton("Vize Sınavı", callback_data="start_quiz_Vize")],
+            [InlineKeyboardButton("Final Sınavı", callback_data="start_quiz_Final")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Yeni bir mesaj olarak gönderiyoruz, böylece eski mesajı düzenleme sorunları yaşanmıyor
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Yeni bir quiz başlatmak için lütfen sınav türünü seçin:",
+            reply_markup=reply_markup
+        )
         return
 
     if data == "review_wrong_answers" or data == "review_wrong_answers_list":
@@ -336,7 +349,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         selected_option_letter = data.split('_')[2]
         selected_options = context.user_data[user_id].setdefault("selected_options", [])
         
-        # answer_type'ı artık kontrol etmiyoruz, tüm sorular çoktan seçmeli gibi davranacak
+        # Tüm sorular çoktan seçmeli olduğu için tekli/çoklu seçim ayrımı kaldırıldı
         if selected_option_letter in selected_options:
             selected_options.remove(selected_option_letter)
         else:
